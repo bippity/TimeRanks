@@ -8,39 +8,45 @@ using TShockAPI;
 using TShockAPI.Hooks;
 using Terraria;
 using TerrariaApi.Server;
-using Mono.Data.Sqlite;
 using MySql.Data.MySqlClient;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Threading.Tasks;
+using Microsoft.Data.Sqlite;
 
 namespace TimeRanks //simplified from White's TimeBasedRanks plugin
 {
-    [ApiVersion(1,17)]
+    [ApiVersion(2,1)]
     public class TimeRanks : TerrariaPlugin
     {
         private IDbConnection _db;
         public static Database dbManager;
         public static Config config = new Config();
         private static Timers _timers;
+        static HttpClient client = new HttpClient();
 
-        internal static readonly TrPlayers Players = new TrPlayers();
+
+        public static readonly TrPlayers Players = new TrPlayers();
 
         public override string Author
         {
-            get { return "White/Bippity"; }
+            get { return "Average"; }
         }
 
         public override string Description
         {
-            get { return "Simplified Timed-Based Ranks"; }
+            get { return "Rank progression system based on user playtime"; }
         }
 
         public override string Name
         {
-            get { return "Timed Ranks"; }
+            get { return "TimeRanks"; }
         }
 
         public override Version Version
         {
-            get { return new Version(0, 1); }
+            get { return new Version(1, 1, 0); }
         }
 
         public TimeRanks(Main game)
@@ -50,24 +56,23 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
 
         public override void Initialize()
         {
-            switch (TShock.Config.StorageType.ToLower())
+            switch (TShock.Config.Settings.StorageType.ToLower())
             {
                 case "sqlite":
-                    _db = new SqliteConnection(string.Format("uri=file://{0},Version=3",
-                        Path.Combine(TShock.SavePath, "TimeRanksData.sqlite")));
+                    _db = new SqliteConnection(("Data Source=" + Path.Combine(TShock.SavePath, "TimeRanksData.sqlite")));
                     break;
                 case "mysql":
                     try
                     {
-                        var host = TShock.Config.MySqlHost.Split(':');
+                        var host = TShock.Config.Settings.MySqlHost.Split(':');
                         _db = new MySqlConnection
                         {
                             ConnectionString = String.Format("Server={0}; Port={1}; Database={2}; Uid={3}; Pwd={4}",
                             host[0],
                             host.Length == 1 ? "3306" : host[1],
-                            TShock.Config.MySqlDbName,
-                            TShock.Config.MySqlUsername,
-                            TShock.Config.MySqlPassword
+                            TShock.Config.Settings.MySqlDbName,
+                            TShock.Config.Settings.MySqlUsername,
+                            TShock.Config.Settings.MySqlPassword
                             )
                         };
                     }
@@ -131,7 +136,27 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
             {
                 HelpText = "Deletes a player's rank from the database"
             });
+            Commands.ChatCommands.Add(new Command("tbr.rank.admin", Reload, "rreload")
+            {
+                HelpText = "Reloads the TimeRanks plugin."
+            });
+            Commands.ChatCommands.Add(new Command("tbr.vote", Reward, "reward")
+            {
+                HelpText = "Rewards the player for voting."
+            });
             dbManager.InitialSyncPlayers();
+        }
+
+        private static void Reload(CommandArgs args)
+        {
+            var configPath = Path.Combine(TShock.SavePath, "TimeRanks.json");
+            (config = Config.Read(configPath)).Write(configPath);
+            args.Player.SendSuccessMessage("TimeRanks configuration file has been reloaded!");
+        }
+
+        public void givePlaytime(TSPlayer player, int time)
+        {
+            Players.GetByUsername(player.Name).totaltime += 1500;
         }
 
         private static void Check(CommandArgs args)
@@ -140,13 +165,13 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
             {
                 var str = string.Join(" ", args.Parameters);
                 var players = Players.GetListByUsername(str).ToList();
-                var tsplayers = TShock.Utils.FindPlayer(str);
+                var tsplayers = TShock.UserAccounts.GetUserAccountsByName(str);
 
                 if (tsplayers.Count > 1)
-                    TShock.Utils.SendMultipleMatchError(args.Player, tsplayers.Select(p => p.Name));
+                    TShock.Utils.SendLogs(args.Player.Account.Name, Microsoft.Xna.Framework.Color.Blue);
 
                 if (players.Count > 1)
-                    TShock.Utils.SendMultipleMatchError(args.Player, players.Select(p => p.name));
+                    TShock.Utils.SendLogs(args.Player.Account.Name, Microsoft.Xna.Framework.Color.Blue);
                 else
                     switch (players.Count)
                     {
@@ -160,12 +185,10 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
                                 return;
                             }
 
-                            args.Player.SendSuccessMessage("{0}'s registration date: " + players[0].firstlogin, players[0].name);
-                            args.Player.SendSuccessMessage("{0}'s total registered time: " + players[0].TotalRegisteredTime, players[0].name);
+                            args.Player.SendSuccessMessage("{0}'s registration date: (for {1})" + players[0].firstlogin, players[0].name, players[0].TotalRegisteredTime);
                             args.Player.SendSuccessMessage("{0}'s total time played: " + players[0].TimePlayed, players[0].name);
-                            args.Player.SendSuccessMessage("{0}'s total activeness time: " + players[0].TotalTime, players[0].name);
                             args.Player.SendSuccessMessage("{0}'s current rank position: " + players[0].GroupPosition + " (" + players[0].Group + ")", players[0].name);
-                            args.Player.SendSuccessMessage("{0}'s next rank: " + players[0].NextGroupName, players[0].name);
+                            args.Player.SendSuccessMessage("{0}'s next rank: " + players[0].NextGroupName + " will unlock in... {1}", players[0].name, players[0].NextRankTime);
                             if (players[0].Online)
                             {
                                 args.Player.SendSuccessMessage("{0} was last online: " + players[0].lastlogin + " (" + players[0].LastOnline.ElapsedString() + " ago)", players[0].name);
@@ -177,18 +200,100 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
             {
                 if (args.Player == TSPlayer.Server)
                 {
-                    args.Player.SendErrorMessage("Sorry, the server doesn't have stats to check");
+                    args.Player.SendErrorMessage("You cannot check the server user's playtime! Sorry :(");
                     return;
                 }
-                var player = Players.GetByUsername(args.Player.UserAccountName);
-                args.Player.SendSuccessMessage("Your registration date: " + player.firstlogin);
-                args.Player.SendSuccessMessage("Your total registered time: " + player.TotalRegisteredTime);
+                var player = Players.GetByUsername(args.Player.Account.Name);
+                args.Player.SendSuccessMessage("Your registration date: " + player.firstlogin + " (for " + player.TotalRegisteredTime + ")");
                 args.Player.SendSuccessMessage("Your total time played: " + player.TotalTime);
-                args.Player.SendSuccessMessage("Your total activeness time: " + player.TimePlayed);
                 args.Player.SendSuccessMessage("Your current rank position: " + player.GroupPosition + " (" + player.Group + ")");
-                args.Player.SendSuccessMessage("Your next rank: " + player.NextGroupName);
-                args.Player.SendSuccessMessage("Next rank in: " + player.NextRankTime);
+                args.Player.SendSuccessMessage("Your next rank: " + player.NextGroupName + " will be unlocked in... " + player.NextRankTime);
             }
+        }
+
+        private static void Reward(CommandArgs args)
+        {
+
+            if (!args.Player.IsLoggedIn)
+            {
+                args.Player.SendErrorMessage("You must be logged in first!");
+                return;
+            }
+
+            string playerName = args.Player.Account.Name;
+
+
+            if (Players.GetByUsername(args.Player.Name).lastRewardUsed != null) { 
+                DateTime now = DateTime.Now;
+                DateTime then = DateTime.Parse(Players.GetByUsername(args.Player.Name).lastRewardUsed);
+
+                if (now.Subtract(then).TotalHours >= 24)
+                {
+
+                }
+                else
+                {
+                    args.Player.SendErrorMessage("You have already claimed your reward for today!");
+                    return;
+                }
+
+            }
+
+
+            if(checkifPlayerVoted(args.Player).Result == true)
+            {
+                Players.GetByUsername(args.Player.Name).totaltime += 3600;
+                TSPlayer.All.SendMessage(args.Player.Name + " has voted for us and received one hour of playtime added to their account! Use /tvote to get the same reward!", Microsoft.Xna.Framework.Color.Aqua);
+                Players.GetByUsername(args.Player.Name).lastRewardUsed = DateTime.Now.ToString();
+            }
+
+        }
+
+        public static async Task<bool> checkifPlayerVoted(TSPlayer player)
+        {
+            bool hasVoted = false;
+
+            string voteUrl = "http://terraria-servers.com/api/?object=votes&element=claim&key=" + config.voteApiKey + "&username=" + player.Name;
+
+            try
+            {
+                using (HttpClient client = new HttpClient())
+                {
+                    using (HttpResponseMessage res = await client.GetAsync(voteUrl))
+                    {
+                        using (HttpContent content = res.Content)
+                        {
+                            var data = await content.ReadAsStringAsync();
+
+                            if(data != null)
+                            {
+                                if (data == "1")
+                                {
+                                    hasVoted = true;
+                                    return hasVoted;
+                                }
+                                else
+                                {
+                                    hasVoted = false;
+                                    return hasVoted;
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine("No data");
+                            }
+                        }
+                    }
+                }
+            }catch (Exception ex)
+            {
+                Console.WriteLine("Exception!!!!");
+                Console.Write(ex);
+                return hasVoted;
+            }
+
+            return hasVoted;
+
         }
 
         private static void OnGreet(GreetPlayerEventArgs args)
@@ -210,7 +315,7 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
 
             if (!ply.IsLoggedIn) return;
 
-            var player = Players.GetByUsername(ply.UserAccountName);
+            var player = Players.GetByUsername(ply.Account.Name);
             if (player == null)
                 return;
 
@@ -218,21 +323,44 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
             player.tsPlayer = null; //removes the player from the initialized database/queue thingy?
         }
 
+        private static void checkUserForRankup(PlayerPostLoginEventArgs args)
+        {
+            var player = Players.GetByUsername(args.Player.Account.Name);
+            if (!player.ConfigContainsGroup) {
+                return;
+            }
+
+            var user = TShock.UserAccounts.GetUserAccountByName(player.name);
+            var groupIndex = TimeRanks.config.Groups.Keys.ToList().IndexOf(player.Group) + 1;
+
+            if (player.totaltime >= player.NextRankInfo.rankCost)
+            {
+                TShock.UserAccounts.SetUserGroup(user, TimeRanks.config.Groups.Keys.ElementAt(groupIndex));
+                checkUserForRankup(args);
+            }
+            else
+            {
+                return;
+            }
+
+
+        }
+
         private static void PostLogin(PlayerPostLoginEventArgs args)
         {
             if (args.Player == null)
                 return;
-            if (args.Player.Name != args.Player.UserAccountName) //returns if player logs in as different name
+            if (args.Player.Name != args.Player.Account.Name) //returns if player logs in as different name
                 return;
 
-            var player = Players.GetByUsername(args.Player.UserAccountName);
+            var player = Players.GetByUsername(args.Player.Account.Name);
 
             if (player != null)
                 player.tsPlayer = args.Player;
             else
             {
-                player = new TrPlayer(args.Player.UserAccountName, 0, DateTime.UtcNow.ToString("G"),
-                    DateTime.UtcNow.ToString("G"), 0) { tsPlayer = args.Player };
+                player = new TrPlayer(args.Player.Account.Name, 0, DateTime.UtcNow.ToString("G"),
+                    DateTime.UtcNow.ToString("G"), 0, null) { tsPlayer = args.Player };
                 Players.Add(player);
 
                 if (!dbManager.InsertPlayer(player))
@@ -242,21 +370,40 @@ namespace TimeRanks //simplified from White's TimeBasedRanks plugin
             }
 
             if (args.Player.Group.Name == config.StartGroup && config.Groups.Count > 1) //starting rank/new player
-                TShock.Users.SetUserGroup(TShock.Users.GetUserByName(args.Player.UserAccountName), config.Groups.Keys.ToList()[0]); //AutoStarts the player to the config's first rank.
-            
-            if (player.LastOnline.TotalSeconds > player.RankInfo.derankCost && player.RankInfo.derankCost > 0) //if not a new/starting player and passes inactivity limit. 0 = no limit
+                TShock.UserAccounts.SetUserGroup(TShock.UserAccounts.GetUserAccountByName(args.Player.Account.Name), config.Groups.Keys.ToList()[0]); //AutoStarts the player to the config's first rank.
+
+            if (player.ConfigContainsGroup)
             {
-                var groupIndex = TimeRanks.config.Groups.Keys.ToList().IndexOf(player.Group) - 1;
-                if (groupIndex < 0)
-                    return;
-                player.time = 0; //resets player's activeness time back to 0, excluding first rank
-
-                var user = TShock.Users.GetUserByName(player.name);
-
-                TShock.Users.SetUserGroup(user, TimeRanks.config.Groups.Keys.ElementAt(groupIndex));
-                args.Player.SendInfoMessage("You have been demoted to " + player.Group + " due to inactivity!");
-                TShock.Log.ConsoleInfo(user.Name + " has been dropped a rank due to inactivity");
+                checkUserForRankup(args);
             }
+            else
+            {
+                return;
+            }
+
+            if (checkifPlayerVoted(args.Player).Result == true)
+            {
+
+                if (Players.GetByUsername(args.Player.Name).lastRewardUsed != null)
+                {
+                    DateTime now = DateTime.Now;
+                    DateTime then = DateTime.Parse(Players.GetByUsername(args.Player.Name).lastRewardUsed);
+
+                    if (now.Subtract(then).TotalHours >= 24)
+                    {
+                        Players.GetByUsername(args.Player.Name).totaltime += 3600;
+                        TSPlayer.All.SendMessage(args.Player.Name + " has voted for us and received one hour of playtime added to their account! Use /vote to get the same reward!", Microsoft.Xna.Framework.Color.Aqua);
+                    }
+                    else
+                    {
+                        return;
+                    }
+
+                }
+            }
+
+            
+
         }
 
         private static void Delete(CommandArgs args)

@@ -8,11 +8,11 @@ namespace TimeRanks
 {
     public class TrPlayers
     {
-        private readonly List<TrPlayer> _players = new List<TrPlayer>();
+        public readonly List<TrPlayer> _players = new List<TrPlayer>();
 
-        public void Add(string name, int time, string firstlogin, string lastlogin, int totaltime)
+        public void Add(string name, int time, string firstlogin, string lastlogin, int totaltime, string lastRewardUsed)
         {
-            _players.Add(new TrPlayer(name, time, firstlogin, lastlogin, totaltime));
+            _players.Add(new TrPlayer(name, time, firstlogin, lastlogin, totaltime, lastRewardUsed));
         }
         public void Add(TrPlayer player)
         {
@@ -43,11 +43,12 @@ namespace TimeRanks
         public readonly string name;
         public readonly string firstlogin;
         public string lastlogin;
+        public string lastRewardUsed;
         public string Group
         {
             get
             {
-                return !Online ? TShock.Users.GetUserByName(name).Group : tsPlayer.Group.Name;
+                return !Online ? TShock.UserAccounts.GetUserAccountByName(name).Group : tsPlayer.Group.Name;
             }
         }
         public RankInfo RankInfo
@@ -60,13 +61,14 @@ namespace TimeRanks
         public int time;
         public int totaltime;
 
-        public TrPlayer(string name, int time, string first, string last, int totaltime)
+        public TrPlayer(string name, int time, string first, string last, int totaltime, string lastRewardUsed)
         {
-            this.time = time;
+            this.time = totaltime;
             this.name = name;
             firstlogin = first;
             lastlogin = last;
             this.totaltime = totaltime;
+            this.lastRewardUsed = lastRewardUsed;
         }
 
         public string TotalRegisteredTime
@@ -85,8 +87,8 @@ namespace TimeRanks
         {
             get
             {
-                var ts = new TimeSpan(0, 0, 0, time);
-                return ts.ElapsedString();
+                var ts = TotalTime;
+                return ts;
             }
         }
 
@@ -143,7 +145,7 @@ namespace TimeRanks
             }
         }
 
-        private RankInfo NextRankInfo
+        public RankInfo NextRankInfo
         {
             get
             {
@@ -164,7 +166,7 @@ namespace TimeRanks
 
         private static readonly Regex CleanCommandRegex = new Regex(@"^\/?(\w*\w)");
 
-        private bool ConfigContainsGroup
+        public bool ConfigContainsGroup
         {
             get { return TimeRanks.config.Groups.Keys.Contains(Group); }
         }
